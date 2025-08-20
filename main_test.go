@@ -13,7 +13,7 @@ import (
 )
 
 func TestParseArgs_MissingTarget(t *testing.T) {
-	_, _, _, _, err := parseArgs([]string{"-fstype", "tmpfs"})
+	_, _, _, _, _, err := parseArgs([]string{"-fstype", "tmpfs"})
 	if err == nil {
 		t.Fatalf("expected error for missing -target, got nil")
 	}
@@ -73,7 +73,7 @@ func TestMountOperation(t *testing.T) {
 }
 
 func TestParseArgs_DefaultFstypeAndSingleOption(t *testing.T) {
-	target, fstype, mountNS, opts, err := parseArgs([]string{"-target", "/tmp", "-o", "size=64M"})
+	target, fstype, mountNS, source, opts, err := parseArgs([]string{"-target", "/tmp", "-o", "size=64M"})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
@@ -86,13 +86,16 @@ func TestParseArgs_DefaultFstypeAndSingleOption(t *testing.T) {
 	if mountNS != "" {
 		t.Fatalf("expected empty mountNS by default, got %s", mountNS)
 	}
+	if source != "" {
+		t.Fatalf("expected empty source by default, got %s", source)
+	}
 	if !reflect.DeepEqual(opts, []string{"size=64M"}) {
 		t.Fatalf("expected opts [size=64M], got %#v", opts)
 	}
 }
 
 func TestParseArgs_MultipleOptionsAndFstype(t *testing.T) {
-	target, fstype, mountNS, opts, err := parseArgs([]string{"-target", "/mnt/t", "-fstype", "fuse.blah", "-o", "a=1", "-o", "flagonly"})
+	target, fstype, mountNS, source, opts, err := parseArgs([]string{"-target", "/mnt/t", "-fstype", "fuse.blah", "-o", "a=1", "-o", "flagonly"})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
@@ -104,6 +107,9 @@ func TestParseArgs_MultipleOptionsAndFstype(t *testing.T) {
 	}
 	if mountNS != "" {
 		t.Fatalf("expected empty mountNS by default, got %s", mountNS)
+	}
+	if source != "" {
+		t.Fatalf("expected empty source by default, got %s", source)
 	}
 	if !reflect.DeepEqual(opts, []string{"a=1", "flagonly"}) {
 		t.Fatalf("expected opts [a=1 flagonly], got %#v", opts)

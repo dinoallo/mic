@@ -91,7 +91,7 @@ func moveMount(fromFd int, fromPath string, toFd int, toPath string, flags uint)
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s -target <dir> [-fstype <type>] [-o key=val]...\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s -target <dir> [-source <source>] [-fstype <type>] [-mount_namespace <path>] [-o key=val]...\n", os.Args[0])
 	flag.PrintDefaults()
 }
 
@@ -99,25 +99,26 @@ func usage() {
 // and returns the target, fstype, options and an error when parsing fails or
 // when the required -target is missing. This is testable without performing
 // any privileged syscalls.
-func parseArgs(args []string) (target string, fstype string, mountNS string, opts []string, err error) {
+func parseArgs(args []string) (target string, fstype string, mountNS string, source string, opts []string, err error) {
 	fs := flag.NewFlagSet("mic", flag.ContinueOnError)
 	var o multiString
 	fs.StringVar(&target, "target", "", "Target mountpoint directory")
 	fs.StringVar(&fstype, "fstype", "tmpfs", "Filesystem type to mount (e.g. tmpfs)")
 	fs.StringVar(&mountNS, "mount_namespace", "", "Path to target mount namespace (e.g. /proc/<pid>/ns/mnt)")
+	fs.StringVar(&source, "source", "", "Source device or path (like mount(8) source)")
 	fs.Var(&o, "o", "fsconfig option as key=val; can be repeated")
 	// Silence default output on parse errors; caller can inspect err
 	if err := fs.Parse(args); err != nil {
-		return "", "", "", nil, err
+		return "", "", "", "", nil, err
 	}
 	if target == "" {
-		return "", "", "", nil, fmt.Errorf("missing -target")
+		return "", "", "", "", nil, fmt.Errorf("missing -target")
 	}
-	return target, fstype, mountNS, []string(o), nil
+	return target, fstype, mountNS, source, []string(o), nil
 }
 
 func main() {
-	target, fstype, mountNS, opts, err := parseArgs(os.Args[1:])
+	target, fstype, mountNS, source, opts, err := parseArgs(os.Args[1:])
 	if err != nil {
 		usage()
 		os.Exit(2)
@@ -140,6 +141,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer unix.Close(fsfd)
+
+	// if a source string was provided, set it as an fsconfig string 'source'
+	if source != "" {
+		if err := fsconfig(fsfd, FSCONFIG_SET_STRING, bs("source"), bs(source), 0); err != nil {
+			fmt.Fprintf(os.Stderr, "fsconfig set source=%s failed: %v\n", source, err)
+			os.Exit(1)
+		}
+	}
 
 	// apply options
 	for _, kv := range opts {

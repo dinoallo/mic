@@ -29,7 +29,10 @@ go build -o mic
 
 ```bash
 # Mount tmpfs at /mnt/mytarget with size 64M (requires root/capabilities)
-sudo ./mic -target /mnt/mytarget -fstype tmpfs -o size=64M
+sudo ./mic -target /mnt/mytarget -source none -fstype tmpfs -o size=64M
+
+# Example using a source device/path (like mount(8) source)
+sudo ./mic -target /mnt/mytarget -source /dev/sdb1 -fstype ext4 -o ro
 
 # Move the mount into an existing mount namespace (e.g. /proc/<pid>/ns/mnt)
 sudo ./mic -target /path/in/target/ns -mount_namespace /proc/<pid>/ns/mnt -fstype tmpfs -o size=64M
