@@ -8,8 +8,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,65 +28,7 @@ const (
 	MOVE_MOUNT_F_EMPTY_PATH = 0x00000004
 )
 
-func bs(s string) *byte {
-	p, _ := syscall.BytePtrFromString(s)
-	return p
-}
-
-func fsopen(fsType string, flags uint) (int, error) {
-	// syscall: int fsopen(const char *fs_name, unsigned int flags);
-	ptr := uintptr(unsafe.Pointer(bs(fsType)))
-	r1, _, err := unix.Syscall(unix.SYS_FSOPEN, ptr, uintptr(flags), 0)
-	if err != 0 {
-		return -1, err
-	}
-	return int(r1), nil
-}
-
-func fsconfig(fd int, cmd uint, key, value *byte, aux int) error {
-	// syscall: int fsconfig(int fs_fd, unsigned int cmd, const char *key,
-	//                        const void *value, int aux);
-	kptr := uintptr(0)
-	vptr := uintptr(0)
-	if key != nil {
-		kptr = uintptr(unsafe.Pointer(key))
-	}
-	if value != nil {
-		vptr = uintptr(unsafe.Pointer(value))
-	}
-	_, _, err := unix.Syscall6(unix.SYS_FSCONFIG, uintptr(fd), uintptr(cmd), kptr, vptr, uintptr(aux), 0)
-	if err != 0 {
-		return err
-	}
-	return nil
-}
-
-func fsmount(fd int, flags uint, attr_flags uint) (int, error) {
-	// syscall: int fsmount(int fs_fd, unsigned int flags, unsigned int attr_flags);
-	r1, _, err := unix.Syscall(unix.SYS_FSMOUNT, uintptr(fd), uintptr(flags), uintptr(attr_flags))
-	if err != 0 {
-		return -1, err
-	}
-	return int(r1), nil
-}
-
-func moveMount(fromFd int, fromPath string, toFd int, toPath string, flags uint) error {
-	// syscall: int move_mount(int from_dfd, const char *from_pathname,
-	//                         int to_dfd, const char *to_pathname, unsigned int flags);
-	fromPathPtr := uintptr(0)
-	toPathPtr := uintptr(0)
-	if fromPath != "" {
-		fromPathPtr = uintptr(unsafe.Pointer(bs(fromPath)))
-	}
-	if toPath != "" {
-		toPathPtr = uintptr(unsafe.Pointer(bs(toPath)))
-	}
-	_, _, err := unix.Syscall6(unix.SYS_MOVE_MOUNT, uintptr(fromFd), fromPathPtr, uintptr(toFd), toPathPtr, uintptr(flags), 0)
-	if err != 0 {
-		return err
-	}
-	return nil
-}
+// Use syscall wrappers provided by golang.org/x/sys/unix: Fsopen, Fsconfig, Fsmount, MoveMount.
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s -target <dir> [-source <source>] [-fstype <type>] [-mount_namespace <path>] [-o key=val]...\n", os.Args[0])
@@ -99,26 +39,36 @@ func usage() {
 // and returns the target, fstype, options and an error when parsing fails or
 // when the required -target is missing. This is testable without performing
 // any privileged syscalls.
-func parseArgs(args []string) (target string, fstype string, mountNS string, source string, opts []string, err error) {
+func parseArgs(args []string) (target string, fstype string, mountNS string, source string, bind bool, opts []string, err error) {
+	// Support both --bind and -bind by normalizing args before parsing.
+	for i, a := range args {
+		if a == "--bind" {
+			args[i] = "-bind"
+		} else if strings.HasPrefix(a, "--bind=") {
+			args[i] = "-bind=" + a[len("--bind="):]
+		}
+	}
+
 	fs := flag.NewFlagSet("mic", flag.ContinueOnError)
 	var o multiString
 	fs.StringVar(&target, "target", "", "Target mountpoint directory")
 	fs.StringVar(&fstype, "fstype", "tmpfs", "Filesystem type to mount (e.g. tmpfs)")
 	fs.StringVar(&mountNS, "mount_namespace", "", "Path to target mount namespace (e.g. /proc/<pid>/ns/mnt)")
 	fs.StringVar(&source, "source", "", "Source device or path (like mount(8) source)")
+	fs.BoolVar(&bind, "bind", false, "Perform a bind mount (like mount --bind <source> <target>)")
 	fs.Var(&o, "o", "fsconfig option as key=val; can be repeated")
 	// Silence default output on parse errors; caller can inspect err
 	if err := fs.Parse(args); err != nil {
-		return "", "", "", "", nil, err
+		return "", "", "", "", false, nil, err
 	}
 	if target == "" {
-		return "", "", "", "", nil, fmt.Errorf("missing -target")
+		return "", "", "", "", false, nil, fmt.Errorf("missing -target")
 	}
-	return target, fstype, mountNS, source, []string(o), nil
+	return target, fstype, mountNS, source, bind, []string(o), nil
 }
 
 func main() {
-	target, fstype, mountNS, source, opts, err := parseArgs(os.Args[1:])
+	target, fstype, mountNS, source, bind, opts, err := parseArgs(os.Args[1:])
 	if err != nil {
 		usage()
 		os.Exit(2)
@@ -135,7 +85,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fsfd, err := fsopen(fstype, 0)
+	fsfd, err := unix.Fsopen(fstype, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fsopen(%s) failed: %v\n", fstype, err)
 		os.Exit(1)
@@ -144,7 +94,7 @@ func main() {
 
 	// if a source string was provided, set it as an fsconfig string 'source'
 	if source != "" {
-		if err := fsconfig(fsfd, FSCONFIG_SET_STRING, bs("source"), bs(source), 0); err != nil {
+		if err := unix.FsconfigSetString(fsfd, "source", source); err != nil {
 			fmt.Fprintf(os.Stderr, "fsconfig set source=%s failed: %v\n", source, err)
 			os.Exit(1)
 		}
@@ -160,12 +110,12 @@ func main() {
 		}
 		if val == "" {
 			// set flag
-			if err := fsconfig(fsfd, FSCONFIG_SET_FLAG, bs(key), nil, 0); err != nil {
+			if err := unix.FsconfigSetFlag(fsfd, key); err != nil {
 				fmt.Fprintf(os.Stderr, "fsconfig set flag %s failed: %v\n", key, err)
 				os.Exit(1)
 			}
 		} else {
-			if err := fsconfig(fsfd, FSCONFIG_SET_STRING, bs(key), bs(val), 0); err != nil {
+			if err := unix.FsconfigSetString(fsfd, key, val); err != nil {
 				fmt.Fprintf(os.Stderr, "fsconfig set %s=%s failed: %v\n", key, val, err)
 				os.Exit(1)
 			}
@@ -173,18 +123,73 @@ func main() {
 	}
 
 	// create the fs context
-	if err := fsconfig(fsfd, FSCONFIG_CMD_CREATE, nil, nil, 0); err != nil {
+	if err := unix.FsconfigCreate(fsfd); err != nil {
 		fmt.Fprintf(os.Stderr, "fsconfig create failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	mfd, err := fsmount(fsfd, 0, 0)
+	mfd, err := unix.Fsmount(fsfd, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fsmount failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer unix.Close(mfd)
 
+	if bind {
+		// bind mount: require a source
+		if source == "" {
+			fmt.Fprintf(os.Stderr, "bind mount requires -source <path>\n")
+			os.Exit(2)
+		}
+
+		if mountNS != "" {
+			// perform setns into target namespace to ensure target exists and attach there
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+
+			nsFd, err := unix.Open(mountNS, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "open mount namespace %s failed: %v\n", mountNS, err)
+				os.Exit(1)
+			}
+			defer unix.Close(nsFd)
+
+			selfNs, err := unix.Open("/proc/self/ns/mnt", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "open self ns failed: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := unix.Setns(nsFd, unix.CLONE_NEWNS); err != nil {
+				unix.Close(selfNs)
+				fmt.Fprintf(os.Stderr, "setns to %s failed: %v\n", mountNS, err)
+				os.Exit(1)
+			}
+
+			if err := os.MkdirAll(target, 0755); err != nil {
+				_ = unix.Setns(selfNs, unix.CLONE_NEWNS)
+				unix.Close(selfNs)
+				fmt.Fprintf(os.Stderr, "mkdir in target ns failed: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := unix.Setns(selfNs, unix.CLONE_NEWNS); err != nil {
+				unix.Close(selfNs)
+				fmt.Fprintf(os.Stderr, "restore self ns failed: %v\n", err)
+				os.Exit(1)
+			}
+			unix.Close(selfNs)
+		}
+
+		// perform bind mount in the current namespace
+		if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "bind mount failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("bind mounted %s on %s\n", source, target)
+		return
+	}
 	// If a mount namespace was provided, open it and perform a move_mount into that namespace.
 	if mountNS != "" {
 		// Lock thread because setns affects the current thread
@@ -244,7 +249,7 @@ func main() {
 		// perform move_mount: since we're in target ns, moving mfd (which refers to a mount in the original ns)
 		// we need to call move_mount with from_dfd = mfd and to_dfd = AT_FDCWD, path = target
 		// However syscalls expect file descriptors, so we use from_dfd = mfd and from_path empty.
-		if err := moveMount(mfd, "", unix.AT_FDCWD, target, MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+		if err := unix.MoveMount(mfd, "", unix.AT_FDCWD, target, MOVE_MOUNT_F_EMPTY_PATH); err != nil {
 			fmt.Fprintf(os.Stderr, "move_mount into target ns failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -259,7 +264,7 @@ func main() {
 	} else {
 		// attach the mount to the target path in current namespace
 		// Use MOVE_MOUNT_F_EMPTY_PATH so that from_path can be empty which means use the mount itself
-		if err := moveMount(mfd, "", unix.AT_FDCWD, target, MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+		if err := unix.MoveMount(mfd, "", unix.AT_FDCWD, target, MOVE_MOUNT_F_EMPTY_PATH); err != nil {
 			fmt.Fprintf(os.Stderr, "move_mount attach failed: %v\n", err)
 			os.Exit(1)
 		}
