@@ -1,0 +1,10 @@
+[package]
+name = "mic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rustix = { version = "0.38", features = ["fs", "mount"] }
+libc = "0.2"
+nix = { version = "0.27", features = ["sched"] }
